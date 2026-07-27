@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/vue-3'
-import { axiosInstance } from '@halo-dev/api-client'
 
 interface GalleryImage {
   url: string
@@ -32,6 +31,28 @@ const showUrlInput = ref(false)
 const newImageUrl = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
+let cachedPolicyName: string | null = null
+
+async function getPolicyName(): Promise<string> {
+  if (cachedPolicyName) return cachedPolicyName
+
+  try {
+    const response = await fetch('/apis/storage.halo.run/v1alpha1/policies', {
+      credentials: 'include',
+    })
+    if (response.ok) {
+      const data = await response.json()
+      const items = data?.items || []
+      if (items.length > 0) {
+        cachedPolicyName = items[0].metadata?.name || 'default-policy'
+        return cachedPolicyName!
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch policies:', e)
+  }
+  return 'default-policy'
+}
 
 function selectImage(index: number) {
   selectedIndex.value = index
@@ -66,15 +87,23 @@ async function handleFileSelect(event: Event) {
     for (const file of Array.from(files)) {
       if (!file.type.startsWith('image/')) continue
 
+      const policyName = await getPolicyName()
       const formData = new FormData()
       formData.append('file', file)
+      formData.append('policyName', policyName)
 
-      const { data } = await axiosInstance.post(
-        '/apis/api.console.halo.run/v1alpha1/attachments/upload',
-        formData,
-        { headers: { 'Content-Type': 'multipart/form-data' } },
-      )
+      const response = await fetch('/apis/api.console.halo.run/v1alpha1/attachments/upload', {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      })
 
+      if (!response.ok) {
+        console.error('Upload failed:', response.status, await response.text())
+        continue
+      }
+
+      const data = await response.json()
       const url = data?.status?.permalink || data?.spec?.url || data?.url || ''
       if (url) {
         const newImages = [...images.value, { url, alt: file.name }]
