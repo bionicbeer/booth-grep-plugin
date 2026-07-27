@@ -20,6 +20,7 @@
   "dependencies": {
     "@halo-dev/api-client": "^2.25.1",
     "@halo-dev/components": "^2.25.1",
+    "@halo-dev/richtext-editor": "^2.25.2",
     "@halo-dev/ui-shared": "^2.25.1",
     "@tiptap/core": "^3.29.1",
     "@tiptap/vue-3": "^3.29.1",

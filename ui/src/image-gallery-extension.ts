@@ -1,15 +1,23 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Node, mergeAttributes } from '@tiptap/core'
-import { VueNodeViewRenderer } from '@tiptap/vue-3'
+import {
+  Node,
+  VueNodeViewRenderer,
+  mergeAttributes,
+  ToolboxItem,
+  type Editor,
+  type Range,
+  type ExtensionOptions,
+} from '@halo-dev/richtext-editor'
 import ImageGalleryNode from './components/ImageGalleryNode.vue'
 import { markRaw } from 'vue'
+import RiGalleryLine from '~icons/ri/gallery-line'
 
 interface GalleryImage {
   url: string
   alt: string
 }
 
-export const ImageGalleryExtension = Node.create({
+export const ImageGalleryExtension = Node.create<ExtensionOptions>({
   name: 'imageGallery',
 
   group: 'block',
@@ -72,46 +80,35 @@ export const ImageGalleryExtension = Node.create({
   addOptions() {
     return {
       ...this.parent?.(),
-      getToolboxItems({ editor }: any) {
-        return {
-          priority: 50,
-          component: markRaw(ToolboxItemPlaceholder),
-          props: {
-            editor,
-            icon: null,
-            title: '图片展示器',
-            description: '插入图片展示器',
-            action: () => {
-              editor.chain().focus().insertImageGallery().run()
+      getToolboxItems({ editor }: { editor: Editor }) {
+        return [
+          {
+            priority: 50,
+            component: markRaw(ToolboxItem),
+            props: {
+              editor,
+              icon: markRaw(RiGalleryLine),
+              title: '图片展示器',
+              action: () => {
+                ;(editor.chain().focus() as any).insertImageGallery().run()
+              },
             },
           },
-        }
+        ]
       },
       getCommandMenuItems() {
         return {
           priority: 120,
-          icon: null,
+          icon: markRaw(RiGalleryLine),
           title: '图片展示器',
           keywords: ['image-gallery', 'tupian', 'zhanshiqi', 'photo', 'gallery'],
-          command: ({ editor, range }: any) => {
-            editor
-              .chain()
-              .focus()
-              .deleteRange(range)
-              .insertImageGallery()
-              .run()
+          command: ({ editor, range }: { editor: Editor; range: Range }) => {
+            ;(editor.chain().focus() as any).deleteRange(range).insertImageGallery().run()
           },
         }
       },
     }
   },
 })
-
-// Placeholder component for toolbox item - Halo will render the props
-const ToolboxItemPlaceholder = {
-  name: 'ToolboxItemPlaceholder',
-  props: ['editor', 'icon', 'title', 'description', 'action'],
-  template: '<span></span>',
-}
 
 export default ImageGalleryExtension
