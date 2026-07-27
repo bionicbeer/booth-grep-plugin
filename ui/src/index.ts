@@ -1,6 +1,7 @@
 import { definePlugin } from '@halo-dev/ui-shared'
 import { IconPlug } from '@halo-dev/components'
 import { markRaw } from 'vue'
+import { ImageGalleryExtension } from './image-gallery-extension'
 
 export default definePlugin({
   components: {},
@@ -24,5 +25,9 @@ export default definePlugin({
       },
     },
   ],
-  extensionPoints: {},
+  extensionPoints: {
+    'default:editor:extension:create': () => {
+      return [ImageGalleryExtension]
+    },
+  },
 })
