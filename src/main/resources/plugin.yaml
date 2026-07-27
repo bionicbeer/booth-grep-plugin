@@ -1,0 +1,22 @@
+# Refer https://docs.halo.run/developer-guide/plugin/basics/manifest
+
+apiVersion: plugin.halo.run/v1alpha1
+kind: Plugin
+metadata:
+  # The name defines how the plugin is invoked, A unique name
+  name: booth-grep
+spec:
+  enabled: true
+  requires: ">=2.25.0"
+  author:
+    name: bionicbeer
+    website: https://github.com/bionicbeer
+  logo: logo.png
+  homepage: https://github.com/bionicbeer/booth-grep#readme
+  repo: https://github.com/bionicbeer/booth-grep
+  issues: https://github.com/bionicbeer/booth-grep/issues
+  displayName: "booth-grep"
+  description: "booth-grep - Halo 插件"
+  license:
+    - name: "GPL-3.0"
+      url: "https://github.com/bionicbeer/booth-grep/blob/main/LICENSE"
