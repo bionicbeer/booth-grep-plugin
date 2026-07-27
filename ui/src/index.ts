@@ -2,10 +2,29 @@ import { definePlugin } from '@halo-dev/ui-shared'
 import { IconPlug } from '@halo-dev/components'
 import { markRaw } from 'vue'
 import { ImageGalleryExtension } from './image-gallery-extension'
+import RiDownloadCloudLine from '~icons/ri/download-cloud-line'
 
 export default definePlugin({
   components: {},
   routes: [
+    {
+      parentName: 'Root',
+      route: {
+        path: '/booth-grab',
+        name: 'BoothGrab',
+        component: () => import('./views/BoothGrabView.vue'),
+        meta: {
+          title: '从Booth抓取',
+          searchable: true,
+          menu: {
+            name: '从Booth抓取',
+            group: 'content',
+            icon: markRaw(RiDownloadCloudLine),
+            priority: 1,
+          },
+        },
+      },
+    },
     {
       parentName: 'Root',
       route: {
