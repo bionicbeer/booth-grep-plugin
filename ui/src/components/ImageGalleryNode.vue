@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/vue-3'
+import { axiosInstance } from '@halo-dev/api-client'
 
 interface GalleryImage {
   url: string
@@ -30,6 +31,7 @@ const currentImage = computed(() => {
 const showUrlInput = ref(false)
 const newImageUrl = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
 
 function selectImage(index: number) {
   selectedIndex.value = index
@@ -54,25 +56,38 @@ function triggerFileUpload() {
   fileInputRef.value?.click()
 }
 
-function handleFileSelect(event: Event) {
+async function handleFileSelect(event: Event) {
   const input = event.target as HTMLInputElement
   const files = input.files
   if (!files || files.length === 0) return
 
-  Array.from(files).forEach((file) => {
-    if (!file.type.startsWith('image/')) return
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const url = e.target?.result as string
-      const newImages = [...images.value, { url, alt: file.name }]
-      updateImages(newImages)
-      selectedIndex.value = newImages.length - 1
-    }
-    reader.readAsDataURL(file)
-  })
+  uploading.value = true
+  try {
+    for (const file of Array.from(files)) {
+      if (!file.type.startsWith('image/')) continue
 
-  // Reset input
-  input.value = ''
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const { data } = await axiosInstance.post(
+        '/apis/api.console.halo.run/v1alpha1/attachments/upload',
+        formData,
+        { headers: { 'Content-Type': 'multipart/form-data' } },
+      )
+
+      const url = data?.status?.permalink || data?.spec?.url || data?.url || ''
+      if (url) {
+        const newImages = [...images.value, { url, alt: file.name }]
+        updateImages(newImages)
+        selectedIndex.value = newImages.length - 1
+      }
+    }
+  } catch (e) {
+    console.error('Upload failed:', e)
+  } finally {
+    uploading.value = false
+    input.value = ''
+  }
 }
 
 function removeImage(index: number) {
