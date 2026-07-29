@@ -85,28 +85,156 @@ async function scrape() {
   }
 }
 
-function buildHtml(): string {
+async function getPolicyName(): Promise<string> {
+  try {
+    const response = await fetch('/apis/storage.halo.run/v1alpha1/policies', {
+      credentials: 'include',
+    })
+    if (response.ok) {
+      const data = await response.json()
+      const items = data?.items || []
+      if (items.length > 0) {
+        return items[0].metadata?.name || 'default-policy'
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch policies:', e)
+  }
+  return 'default-policy'
+}
+
+async function uploadImageToAttachment(imageUrl: string, filename: string): Promise<string | null> {
+  try {
+    // Download image from proxy
+    const response = await fetch(imageUrl, { credentials: 'include' })
+    if (!response.ok) return null
+
+    const blob = await response.blob()
+    const file = new File([blob], filename, { type: blob.type || 'image/jpeg' })
+
+    // Upload to Halo attachment system
+    const policyName = await getPolicyName()
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('policyName', policyName)
+
+    const uploadResponse = await fetch('/apis/api.console.halo.run/v1alpha1/attachments/upload', {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+    })
+
+    if (!uploadResponse.ok) {
+      console.error('Upload failed:', uploadResponse.status)
+      return null
+    }
+
+    const data = await uploadResponse.json()
+    return data?.status?.permalink || data?.spec?.url || null
+  } catch (e) {
+    console.error('Failed to upload image:', e)
+    return null
+  }
+}
+
+function buildTiptapContent(): { type: string; content: any[] } {
+  const imgs = Array.from(selectedImages.value)
+    .map((i) => result.value!.images[i])
+    .filter(Boolean)
+
+  const content: any[] = []
+
+  // Author paragraph
+  if (author.value) {
+    content.push({
+      type: 'paragraph',
+      content: [
+        { type: 'text', text: '作者：', marks: [{ type: 'bold' }] },
+        { type: 'text', text: author.value },
+      ],
+    })
+  }
+
+  // Description paragraphs (split by newlines)
+  if (description.value) {
+    const lines = description.value.split('\n').filter((l) => l.trim())
+    for (const line of lines) {
+      content.push({
+        type: 'paragraph',
+        content: [{ type: 'text', text: line.trim() }],
+      })
+    }
+  }
+
+  // Image gallery node
+  if (imgs.length > 0) {
+    content.push({
+      type: 'imageGallery',
+      attrs: {
+        images: imgs.map((url) => ({ url, alt: '' })),
+      },
+    })
+  }
+
+  // Source link
+  if (url.value) {
+    content.push({
+      type: 'paragraph',
+      content: [
+        { type: 'text', text: '来源：', marks: [{ type: 'italic' }] },
+        {
+          type: 'text',
+          text: url.value,
+          marks: [{ type: 'link', attrs: { href: url.value, target: '_blank' } }],
+        },
+      ],
+    })
+  }
+
+  return { type: 'doc', content }
+}
+
+function buildHtmlContent(uploadedUrls: string[]): string {
   const imgs = Array.from(selectedImages.value)
     .map((i) => result.value!.images[i])
     .filter(Boolean)
 
   let html = ''
+
+  // Author
   if (author.value) {
-    html += `<p><strong>作者:</strong> ${author.value}</p>\n`
+    html += `<p><strong>作者：</strong>${author.value}</p>`
   }
+
+  // Description (split by newlines into paragraphs)
   if (description.value) {
-    html += `<p>${description.value}</p>\n`
-  }
-  if (imgs.length > 0) {
-    html += '<div class="image-gallery">\n'
-    for (const src of imgs) {
-      html += `  <img src="${src}" alt="" style="max-width:100%;margin-bottom:8px;border-radius:8px;" />\n`
+    const lines = description.value.split('\n').filter((l) => l.trim())
+    for (const line of lines) {
+      html += `<p>${line.trim()}</p>`
     }
-    html += '</div>\n'
   }
+
+  // Image gallery widget
+  if (imgs.length > 0) {
+    const galleryUrls = uploadedUrls.length > 0 ? uploadedUrls : imgs
+    const mainImg = galleryUrls[0]
+    const galleryId = `ig-${Date.now()}`
+
+    html += `<div data-type="image-gallery" data-images='${JSON.stringify(galleryUrls.map((url) => ({ url, alt: '' })))}' id="${galleryId}" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:1rem 0;">`
+    html += `<img class="ig-main" src="${mainImg}" alt="" style="width:100%;max-height:500px;object-fit:contain;display:block;border-radius:8px 8px 0 0;background:#f3f4f6;" />`
+    html += `<div style="display:flex;gap:6px;padding:8px;overflow-x:auto;background:#f9fafb;border-top:1px solid #e5e7eb;">`
+    galleryUrls.forEach((url, i) => {
+      const borderColor = i === 0 ? '#3b82f6' : 'transparent'
+      html += `<img class="ig-thumb" src="${url}" alt="" data-index="${i}" style="width:72px;height:72px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ${borderColor};transition:border-color .2s;" />`
+    })
+    html += `</div></div>`
+  }
+
+  // Source link
   if (url.value) {
-    html += `<p><em>来源: <a href="${url.value}" target="_blank" rel="noopener">${url.value}</a></em></p>\n`
+    html += `<p><em>来源：<a href="${url.value}" target="_blank" rel="noopener">${url.value}</a></em></p>`
   }
+
   return html
 }
 
@@ -118,7 +246,41 @@ async function saveAsPost() {
 
   saving.value = true
   try {
-    const htmlContent = buildHtml()
+    // Upload selected images to attachment system
+    const selectedImgUrls = Array.from(selectedImages.value)
+      .map((i) => result.value!.images[i])
+      .filter(Boolean)
+
+    Toast.info(`正在上传 ${selectedImgUrls.length} 张图片...`)
+
+    const uploadedUrls: string[] = []
+    for (let i = 0; i < selectedImgUrls.length; i++) {
+      const imgUrl = selectedImgUrls[i]
+      const filename = `booth-${Date.now()}-${i}.jpg`
+      const attachmentUrl = await uploadImageToAttachment(imgUrl, filename)
+      if (attachmentUrl) {
+        uploadedUrls.push(attachmentUrl)
+      }
+    }
+
+    if (uploadedUrls.length === 0 && selectedImgUrls.length > 0) {
+      Toast.error('图片上传失败')
+      return
+    }
+
+    // Build Tiptap JSON content (for editor)
+    const tiptapContent = buildTiptapContent()
+    // Build HTML content (for frontend rendering)
+    const htmlContent = buildHtmlContent(uploadedUrls)
+
+    // Replace image URLs with uploaded attachment URLs in Tiptap content
+    if (uploadedUrls.length > 0) {
+      const galleryNode = tiptapContent.content.find((node: any) => node.type === 'imageGallery')
+      if (galleryNode) {
+        galleryNode.attrs.images = uploadedUrls.map((url) => ({ url, alt: '' }))
+      }
+    }
+
     const slug = title.value
       .trim()
       .toLowerCase()
@@ -143,7 +305,7 @@ async function saveAsPost() {
           visible: 'PUBLIC',
           priority: 0,
           excerpt: { autoGenerate: true },
-          cover: result.value?.images?.[0] || '',
+          cover: uploadedUrls[0] || result.value?.images?.[0] || '',
         },
       },
       content: {

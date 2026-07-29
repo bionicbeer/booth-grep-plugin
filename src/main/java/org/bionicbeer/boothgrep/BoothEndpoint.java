@@ -37,6 +37,10 @@ public class BoothEndpoint implements CustomEndpoint {
                         builder -> builder.operationId("ScrapeBoothProduct")
                                 .description("Scrape a booth.pm product page")
                                 .tag(tag))
+                .GET("/booth/image-proxy", this::proxyImage,
+                        builder -> builder.operationId("ProxyBoothImage")
+                                .description("Proxy a booth.pximg.net image to avoid CORS issues")
+                                .tag(tag))
                 .build();
     }
 
@@ -59,6 +63,36 @@ public class BoothEndpoint implements CustomEndpoint {
                     }
                     return fetchAndParse(url)
                             .flatMap(data -> ServerResponse.ok().bodyValue(data));
+                });
+    }
+
+    private Mono<ServerResponse> proxyImage(ServerRequest request) {
+        String imageUrl = request.queryParam("url").orElse("");
+        if (imageUrl.isEmpty() || !imageUrl.contains("booth.pximg.net")) {
+            return ServerResponse.badRequest().bodyValue(Map.of("error", "Invalid image URL"));
+        }
+        
+        return webClient.get()
+                .uri(imageUrl)
+                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                .header("Referer", "https://booth.pm/")
+                .retrieve()
+                .bodyToMono(byte[].class)
+                .flatMap(bytes -> {
+                    String contentType = "image/jpeg";
+                    if (imageUrl.endsWith(".png")) contentType = "image/png";
+                    else if (imageUrl.endsWith(".gif")) contentType = "image/gif";
+                    else if (imageUrl.endsWith(".webp")) contentType = "image/webp";
+                    
+                    return ServerResponse.ok()
+                            .header("Content-Type", contentType)
+                            .header("Cache-Control", "public, max-age=86400")
+                            .bodyValue(bytes);
+                })
+                .onErrorResume(e -> {
+                    log.error("Failed to proxy image {}: {}", imageUrl, e.getMessage());
+                    return ServerResponse.status(org.springframework.http.HttpStatus.BAD_GATEWAY)
+                            .bodyValue(Map.of("error", "Failed to fetch image"));
                 });
     }
 
@@ -97,35 +131,68 @@ public class BoothEndpoint implements CustomEndpoint {
         // Author: try multiple strategies
         result.setAuthor(extractAuthor(doc));
 
-        // Images: og:image + page images
+        // Images: multi-strategy extraction
         Set<String> imageSet = new LinkedHashSet<>();
-        String ogImage = getMeta(doc, "og:image");
-        if (ogImage != null) imageSet.add(ogImage);
 
-        // Extract images from JSON-LD or page content
-        doc.select("img[src]").forEach(img -> {
+        // Strategy 1: Product carousel images (primary source)
+        // booth.pm uses Slick carousel with class "market-item-detail-item-image"
+        doc.select("img.market-item-detail-item-image").forEach(img -> {
             String src = img.absUrl("src");
-            if (src != null && !src.isEmpty()
-                    && !src.contains("logo") && !src.contains("icon")
-                    && !src.contains("avatar") && !src.contains("128x128")
-                    && (src.contains("booth.pximg.net") || src.contains("booth.px"))
-                    && !src.contains("_base")) {
-                // Get original size URL if possible
-                src = src.replaceFirst("_base\\.", ".");
-                src = src.replaceFirst("_\\d+x\\d+\\.", ".");
-                imageSet.add(src);
+            if (src != null && !src.isEmpty()) {
+                imageSet.add(normalizeImageUrl(src));
             }
         });
 
-        // Also check for images in data attributes or srcset
-        doc.select("[data-src]").forEach(el -> {
-            String src = el.absUrl("data-src");
-            if (src != null && src.contains("booth.pximg.net")) {
-                imageSet.add(src);
+        // Strategy 2: Thumbnail carousel (may contain images not yet loaded in main carousel)
+        doc.select(".primary-image-thumbnails img[src]").forEach(img -> {
+            String src = img.absUrl("src");
+            if (src != null && !src.isEmpty()) {
+                imageSet.add(normalizeImageUrl(src));
             }
         });
 
-        result.setImages(new ArrayList<>(imageSet));
+        // Strategy 3: og:image as fallback (usually the cover image)
+        String ogImage = getMeta(doc, "og:image");
+        if (ogImage != null) imageSet.add(normalizeImageUrl(ogImage));
+
+        // Strategy 4: JSON-LD structured data image
+        Elements jsonLdScripts = doc.select("script[type=application/ld+json]");
+        for (Element script : jsonLdScripts) {
+            String text = script.data();
+            // Simple regex extraction of image URL from JSON-LD
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"image\"\\s*:\\s*\"([^\"]+)\"")
+                    .matcher(text);
+            if (m.find()) {
+                imageSet.add(normalizeImageUrl(m.group(1)));
+            }
+        }
+
+        // Strategy 5: Catch any remaining booth product images not yet found
+        // Look for images in the main product area that we might have missed
+        doc.select(".primary-image-area img[src], [class*=market-item] img[src]").forEach(img -> {
+            String src = img.absUrl("src");
+            if (src != null && !src.isEmpty() && src.contains("booth.pximg.net")) {
+                imageSet.add(normalizeImageUrl(src));
+            }
+        });
+
+        // Filter: keep only product images from booth.pximg.net, exclude tiny/non-product images
+        imageSet.removeIf(url -> {
+            if (!url.contains("booth.pximg.net")) return true;
+            // Exclude known non-product patterns
+            if (url.contains("avatar") || url.contains("128x128") || url.contains("48x48")) return true;
+            return false;
+        });
+
+        // Convert to proxy URLs to avoid CORS/ORB issues in browser
+        List<String> proxyImages = new ArrayList<>();
+        for (String imgUrl : imageSet) {
+            String proxyUrl = "/apis/console.api.booth-grep.halo.run/v1alpha1/booth/image-proxy?url=" 
+                    + java.net.URLEncoder.encode(imgUrl, java.nio.charset.StandardCharsets.UTF_8);
+            proxyImages.add(proxyUrl);
+        }
+        result.setImages(proxyImages);
 
         // Try to get more detailed description from page body
         String bodyDesc = extractBodyDescription(doc);
@@ -161,14 +228,41 @@ public class BoothEndpoint implements CustomEndpoint {
     private String extractBodyDescription(Document doc) {
         // Try to find the main product description section
         Elements descElements = doc.select("[class*=description], [class*=detail]");
-        StringBuilder sb = new StringBuilder();
+        StringBuilder best = new StringBuilder();
         for (Element el : descElements) {
-            String text = el.text().trim();
-            if (text.length() > 50 && text.length() > sb.length()) {
-                sb = new StringBuilder(text);
+            String text = extractTextWithLineBreaks(el).trim();
+            if (text.length() > 50 && text.length() > best.length()) {
+                best = new StringBuilder(text);
             }
         }
-        return sb.length() > 0 ? sb.toString() : null;
+        return best.length() > 0 ? best.toString() : null;
+    }
+
+    /**
+     * Extract text from an element while preserving line breaks from <br>, <p>, <div> tags.
+     */
+    private String extractTextWithLineBreaks(Element el) {
+        StringBuilder sb = new StringBuilder();
+        for (org.jsoup.nodes.Node node : el.childNodes()) {
+            if (node instanceof org.jsoup.nodes.TextNode) {
+                sb.append(((org.jsoup.nodes.TextNode) node).text());
+            } else if (node instanceof Element child) {
+                String tag = child.tagName().toLowerCase();
+                if (tag.equals("br")) {
+                    sb.append("\n");
+                } else if (tag.equals("p") || tag.equals("div") || tag.equals("li") || tag.equals("tr")) {
+                    if (sb.length() > 0 && !sb.toString().endsWith("\n")) {
+                        sb.append("\n");
+                    }
+                    sb.append(extractTextWithLineBreaks(child));
+                    sb.append("\n");
+                } else {
+                    sb.append(extractTextWithLineBreaks(child));
+                }
+            }
+        }
+        // Collapse multiple consecutive newlines into at most 2
+        return sb.toString().replaceAll("\n{3,}", "\n\n").trim();
     }
 
     private String getMeta(Document doc, String property) {
@@ -180,6 +274,18 @@ public class BoothEndpoint implements CustomEndpoint {
     private String getFirstText(Document doc, String selector) {
         Element el = doc.selectFirst(selector);
         return el != null ? el.text().trim() : null;
+    }
+
+    /**
+     * Normalize booth.pm image URL to get the full-resolution version.
+     * Only removes size prefix (e.g. c/72x72_a2_g5/) but keeps _base_resized suffix
+     * as it's part of the actual filename on the server.
+     */
+    private String normalizeImageUrl(String url) {
+        if (url == null) return "";
+        // Remove size prefix pattern: /c/{size}[_{params]}/
+        url = url.replaceFirst("/c/\\d+x\\d+[^/]*/", "/");
+        return url;
     }
 
     @Data
