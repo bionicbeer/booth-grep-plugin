@@ -144,6 +144,16 @@ function buildTiptapContent(): { type: string; content: any[] } {
 
   const content: any[] = []
 
+  // Image gallery node (at the beginning)
+  if (imgs.length > 0) {
+    content.push({
+      type: 'imageGallery',
+      attrs: {
+        images: imgs.map((url) => ({ url, alt: '' })),
+      },
+    })
+  }
+
   // Author paragraph
   if (author.value) {
     content.push({
@@ -164,16 +174,6 @@ function buildTiptapContent(): { type: string; content: any[] } {
         content: [{ type: 'text', text: line.trim() }],
       })
     }
-  }
-
-  // Image gallery node
-  if (imgs.length > 0) {
-    content.push({
-      type: 'imageGallery',
-      attrs: {
-        images: imgs.map((url) => ({ url, alt: '' })),
-      },
-    })
   }
 
   // Source link
@@ -201,20 +201,7 @@ function buildHtmlContent(uploadedUrls: string[]): string {
 
   let html = ''
 
-  // Author
-  if (author.value) {
-    html += `<p><strong>作者：</strong>${author.value}</p>`
-  }
-
-  // Description (split by newlines into paragraphs)
-  if (description.value) {
-    const lines = description.value.split('\n').filter((l) => l.trim())
-    for (const line of lines) {
-      html += `<p>${line.trim()}</p>`
-    }
-  }
-
-  // Image gallery widget
+  // Image gallery widget (at the beginning)
   if (imgs.length > 0) {
     const galleryUrls = uploadedUrls.length > 0 ? uploadedUrls : imgs
     const mainImg = galleryUrls[0]
@@ -228,6 +215,19 @@ function buildHtmlContent(uploadedUrls: string[]): string {
       html += `<img class="ig-thumb" src="${url}" alt="" data-index="${i}" style="width:72px;height:72px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ${borderColor};transition:border-color .2s;" />`
     })
     html += `</div></div>`
+  }
+
+  // Author
+  if (author.value) {
+    html += `<p><strong>作者：</strong>${author.value}</p>`
+  }
+
+  // Description (split by newlines into paragraphs)
+  if (description.value) {
+    const lines = description.value.split('\n').filter((l) => l.trim())
+    for (const line of lines) {
+      html += `<p>${line.trim()}</p>`
+    }
   }
 
   // Source link
