@@ -1,0 +1,24 @@
+apiVersion: v1alpha1
+kind: Setting
+metadata:
+  name: booth-grep-settings
+spec:
+  forms:
+    - group: deepseek
+      label: DeepSeek AI 设置
+      formSchema:
+        - $formkit: password
+          name: deepseekApiKey
+          label: DeepSeek API 密钥
+          placeholder: "sk-..."
+          help: "用于内容整理功能的 DeepSeek API 密钥"
+        - $formkit: textarea
+          name: titlePrompt
+          label: 标题整理默认提示词
+          rows: 3
+          help: "整理标题时使用的默认提示词"
+        - $formkit: textarea
+          name: descriptionPrompt
+          label: 描述整理默认提示词
+          rows: 5
+          help: "整理商品描述时使用的默认提示词"

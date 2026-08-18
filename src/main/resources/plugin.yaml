@@ -17,6 +17,8 @@ spec:
   issues: https://github.com/bionicbeer/booth-grep/issues
   displayName: "booth-grep"
   description: "booth-grep - Halo 插件"
+  settingName: booth-grep-settings
+  configMapName: booth-grep-configmap
   license:
     - name: "GPL-3.0"
       url: "https://github.com/bionicbeer/booth-grep/blob/main/LICENSE"

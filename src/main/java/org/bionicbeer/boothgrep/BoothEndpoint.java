@@ -13,7 +13,9 @@ import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
+import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.GroupVersion;
+import run.halo.app.extension.ReactiveExtensionClient;
 
 import java.util.*;
 
@@ -22,8 +24,13 @@ import java.util.*;
 public class BoothEndpoint implements CustomEndpoint {
 
     private final WebClient webClient;
+    private final ReactiveExtensionClient client;
 
-    public BoothEndpoint() {
+    private static final String CONFIGMAP_NAME = "booth-grep-configmap";
+    private static final String SETTINGS_KEY = "deepseek";
+
+    public BoothEndpoint(ReactiveExtensionClient client) {
+        this.client = client;
         this.webClient = WebClient.builder()
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(5 * 1024 * 1024))
                 .build();
@@ -40,6 +47,14 @@ public class BoothEndpoint implements CustomEndpoint {
                 .GET("/booth/image-proxy", this::proxyImage,
                         builder -> builder.operationId("ProxyBoothImage")
                                 .description("Proxy a booth.pximg.net image to avoid CORS issues")
+                                .tag(tag))
+                .GET("/booth/deepseek/defaults", this::getDeepSeekDefaults,
+                        builder -> builder.operationId("GetDeepSeekDefaults")
+                                .description("Get DeepSeek AI default settings from plugin config")
+                                .tag(tag))
+                .POST("/booth/deepseek/organize", this::organizeDeepSeekContent,
+                        builder -> builder.operationId("OrganizeWithDeepSeek")
+                                .description("Organize content using DeepSeek AI")
                                 .tag(tag))
                 .build();
     }
@@ -61,7 +76,10 @@ public class BoothEndpoint implements CustomEndpoint {
                         return ServerResponse.badRequest().bodyValue(
                                 Map.of("error", "Invalid booth.pm URL"));
                     }
-                    return fetchAndParse(url)
+                    String ua = body.getUserAgent() != null && !body.getUserAgent().isBlank()
+                            ? body.getUserAgent()
+                            : DEFAULT_USER_AGENT;
+                    return fetchAndParse(url, ua)
                             .flatMap(data -> ServerResponse.ok().bodyValue(data));
                 });
     }
@@ -96,10 +114,12 @@ public class BoothEndpoint implements CustomEndpoint {
                 });
     }
 
-    private Mono<ScrapeResult> fetchAndParse(String url) {
+    private static final String DEFAULT_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+    private Mono<ScrapeResult> fetchAndParse(String url, String userAgent) {
         return webClient.get()
                 .uri(url)
-                .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+                .header("User-Agent", userAgent)
                 .header("Accept-Language", "ja,en;q=0.9")
                 .retrieve()
                 .bodyToMono(String.class)
@@ -291,6 +311,7 @@ public class BoothEndpoint implements CustomEndpoint {
     @Data
     public static class ScrapeRequest {
         private String url;
+        private String userAgent;
     }
 
     @Data
@@ -300,5 +321,132 @@ public class BoothEndpoint implements CustomEndpoint {
         private String author = "";
         private List<String> images = new ArrayList<>();
         private String error;
+    }
+
+    // ==================== DeepSeek Settings & Organize ====================
+
+    private Mono<ServerResponse> getDeepSeekDefaults(ServerRequest request) {
+        return client.fetch(ConfigMap.class, CONFIGMAP_NAME)
+                .map(cm -> {
+                    String json = cm.getData() != null ? cm.getData().get(SETTINGS_KEY) : null;
+                    if (json != null && !json.isEmpty() && !json.equals("{}")) {
+                        try {
+                            return DeepSeekSettings.fromJson(json);
+                        } catch (Exception e) {
+                            return new DeepSeekSettings();
+                        }
+                    }
+                    return new DeepSeekSettings();
+                })
+                .switchIfEmpty(Mono.just(new DeepSeekSettings()))
+                .flatMap(settings -> ServerResponse.ok().bodyValue(settings));
+    }
+
+    private Mono<ServerResponse> organizeDeepSeekContent(ServerRequest request) {
+        return request.bodyToMono(OrganizeRequest.class)
+                .flatMap(body -> {
+                    if (body.getContent() == null || body.getContent().isBlank()) {
+                        return ServerResponse.badRequest().bodyValue(Map.of("error", "Content is required"));
+                    }
+
+                    // Read settings from ConfigMap
+                    return client.fetch(ConfigMap.class, CONFIGMAP_NAME)
+                            .flatMap(cm -> {
+                                DeepSeekSettings settings = new DeepSeekSettings();
+                                String json = cm.getData() != null ? cm.getData().get(SETTINGS_KEY) : null;
+                                if (json != null && !json.isEmpty() && !json.equals("{}")) {
+                                    try {
+                                        settings = DeepSeekSettings.fromJson(json);
+                                    } catch (Exception ignored) {}
+                                }
+
+                                if (settings.getDeepseekApiKey() == null || settings.getDeepseekApiKey().isBlank()) {
+                                    return ServerResponse.badRequest()
+                                            .bodyValue(Map.of("error", "DeepSeek API key not configured"));
+                                }
+
+                                // Build request body for DeepSeek API
+                                Map<String, Object> apiBody = new HashMap<>();
+                                apiBody.put("model", "deepseek-chat");
+                                apiBody.put("temperature", 0.7);
+                                apiBody.put("max_tokens", 2000);
+                                apiBody.put("messages", List.of(
+                                        Map.of("role", "system", "content", "你是一个内容整理助手，请直接返回整理后的内容，不要添加任何解释。"),
+                                        Map.of("role", "user", "content", body.getPrompt() + "\n\n" + body.getContent())
+                                ));
+
+                                return webClient.post()
+                                        .uri("https://api.deepseek.com/v1/chat/completions")
+                                        .header("Content-Type", "application/json")
+                                        .header("Authorization", "Bearer " + settings.getDeepseekApiKey())
+                                        .bodyValue(apiBody)
+                                        .retrieve()
+                                        .bodyToMono(Map.class)
+                                        .map(data -> {
+                                            try {
+                                                List<Map<String, Object>> choices =
+                                                        (List<Map<String, Object>>) data.get("choices");
+                                                if (choices != null && !choices.isEmpty()) {
+                                                    Map<String, Object> message =
+                                                            (Map<String, Object>) choices.get(0).get("message");
+                                                    if (message != null) {
+                                                        String content = (String) message.get("content");
+                                                        if (content != null) {
+                                                            return Map.of("result", content);
+                                                        }
+                                                    }
+                                                }
+                                            } catch (Exception e) {
+                                                log.error("Failed to parse DeepSeek response: {}", e.getMessage());
+                                            }
+                                            return Map.of("result", body.getContent());
+                                        })
+                                        .flatMap(result -> ServerResponse.ok().bodyValue(result))
+                                        .onErrorResume(e -> {
+                                            log.error("DeepSeek API error: {}", e.getMessage());
+                                            return ServerResponse.status(org.springframework.http.HttpStatus.BAD_GATEWAY)
+                                                    .bodyValue(Map.of("error", "DeepSeek API 请求失败: " + e.getMessage()));
+                                        });
+                            })
+                            .switchIfEmpty(ServerResponse.badRequest()
+                                    .bodyValue(Map.of("error", "Settings not initialized")));
+                });
+    }
+
+    @Data
+    public static class OrganizeRequest {
+        private String content;
+        private String prompt;
+    }
+
+    @Data
+    public static class DeepSeekSettings {
+        private String deepseekApiKey = "";
+        private String titlePrompt = "请优化以下标题，使其更简洁、吸引人，适合中文博客文章：";
+        private String descriptionPrompt = "你即将收到一段爬取自Booth.pm的商品描述，你需要完成以下任务并只返回修改后的文本：1. 去除爬取过程中意外混入的其他商品的标题和价格；2.认真阅读文本，并用中文按介绍、使用说明、更新记录、其他文中提到的内容来回复。";
+
+        public String toJson() {
+            return "{\"deepseekApiKey\":\"" + escapeJson(deepseekApiKey)
+                    + "\",\"titlePrompt\":\"" + escapeJson(titlePrompt)
+                    + "\",\"descriptionPrompt\":\"" + escapeJson(descriptionPrompt) + "\"}";
+        }
+
+        public static DeepSeekSettings fromJson(String json) {
+            DeepSeekSettings s = new DeepSeekSettings();
+            try {
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                Map<?, ?> map = mapper.readValue(json, Map.class);
+                if (map.containsKey("deepseekApiKey")) s.setDeepseekApiKey(String.valueOf(map.get("deepseekApiKey")));
+                if (map.containsKey("titlePrompt")) s.setTitlePrompt(String.valueOf(map.get("titlePrompt")));
+                if (map.containsKey("descriptionPrompt")) s.setDescriptionPrompt(String.valueOf(map.get("descriptionPrompt")));
+            } catch (Exception ignored) {}
+            return s;
+        }
+
+        private static String escapeJson(String s) {
+            if (s == null) return "";
+            return s.replace("\\", "\\\\").replace("\"", "\\\"")
+                    .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+        }
     }
 }
