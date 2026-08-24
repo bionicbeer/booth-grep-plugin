@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { axiosInstance } from '@halo-dev/api-client'
+import { axiosInstance, coreApiClient } from '@halo-dev/api-client'
 import { Toast } from '@halo-dev/components'
 
 interface ScrapeResult {
@@ -8,12 +8,19 @@ interface ScrapeResult {
   description: string
   author: string
   images: string[]
+  categories?: string[]
   error?: string
 }
 
 interface Prompts {
   titlePrompt: string
   descriptionPrompt: string
+}
+
+interface HaloCategory {
+  name: string
+  displayName: string
+  slug: string
 }
 
 const API_BASE = '/apis/console.api.booth-grep.halo.run/v1alpha1/booth'
@@ -43,10 +50,105 @@ const organizingDescription = ref(false)
 const useCustomUA = ref(false)
 const customUA = ref('')
 
+// Category state
+const haloCategories = ref<HaloCategory[]>([])
+const selectedCategories = ref<Set<string>>(new Set())
+
+async function loadHaloCategories() {
+  try {
+    const { data } = await coreApiClient.content.category.listCategory({ page: 0, size: 1000 })
+    haloCategories.value = (data.items || [])
+      .map((c) => ({
+        name: c.metadata?.name || '',
+        displayName: c.spec?.displayName || c.metadata?.name || '',
+        slug: c.spec?.slug || '',
+      }))
+      .filter((c) => c.name)
+      .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-CN'))
+  } catch (e) {
+    console.error('Failed to load categories:', e)
+  }
+}
+
+function normalizeCategoryText(s: string): string {
+  let text = s
+  try {
+    text = decodeURIComponent(text)
+  } catch {
+    // keep original text
+  }
+  // Keep letters, digits and CJK only, so "Motion%26Animation", "Motion & Animation",
+  // "motion animation" all normalize to "motionanimation"
+  return text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, '')
+}
+
+// Booth category -> Halo category slug mapping (both sides pre-normalized).
+// Source: user-provided correspondence, e.g. "3D Characters" -> /categories/Avatars.
+const BOOTH_TO_HALO_SLUG: Record<string, string> = {
+  '3dcharacters': 'avatars',
+  '3dclothing': 'clothing',
+  '3dhair': 'hair',
+  '3daccessories': 'accessories',
+  '3dshoes': 'shoes',
+  '3dprops': 'props',
+  '3dtextures': 'textures',
+  '3dmotionanimation': 'motionanimation',
+  '3denvironmentsworld': 'environmentsworld',
+  '3denvironmentsworlds': 'environmentsworld',
+  vroid: 'vroid',
+  '3dmodelsother': 'othermodels',
+}
+
+// Match Booth category names against Halo categories.
+// 1. Explicit mapping table above, e.g. "3D Characters" -> slug "Avatars".
+// 2. Fallback for unmapped names: full name or name with the leading token
+//    (e.g. "3D") dropped, matched against slug / displayName / name,
+//    e.g. "3D Tools & Systems" -> "Tools & Systems" matches slug "Tools&Systems".
+// The generic parent "3D Models" is skipped to avoid noise.
+function autoMatchCategories(boothCategories: string[]): string[] {
+  const matched: string[] = []
+  for (const bc of boothCategories) {
+    const key = normalizeCategoryText(bc)
+    if (key === '3dmodels') continue
+    const mappedKey = BOOTH_TO_HALO_SLUG[key]
+    let candidateKeys: string[]
+    if (mappedKey) {
+      candidateKeys = [mappedKey]
+    } else {
+      candidateKeys = [key]
+      const tokens = bc.trim().split(/\s+/)
+      if (tokens.length > 1) {
+        candidateKeys.push(normalizeCategoryText(tokens.slice(1).join(' ')))
+      }
+    }
+    for (const hc of haloCategories.value) {
+      if (matched.includes(hc.name)) continue
+      const keys = [hc.slug, hc.displayName, hc.name].filter(Boolean).map(normalizeCategoryText)
+      if (candidateKeys.some((c) => keys.includes(c))) {
+        matched.push(hc.name)
+      }
+    }
+  }
+  return matched
+}
+
+function toggleCategory(name: string) {
+  const newSet = new Set(selectedCategories.value)
+  if (newSet.has(name)) {
+    newSet.delete(name)
+  } else {
+    newSet.add(name)
+  }
+  selectedCategories.value = newSet
+}
+
 // Load prompts: localStorage first, then fallback to plugin defaults from backend
 onMounted(async () => {
   // Detect browser UA
   customUA.value = navigator.userAgent
+
+  // Load all Halo categories for the selector
+  loadHaloCategories()
 
   // Check localStorage first
   const saved = localStorage.getItem(PROMPTS_STORAGE_KEY)
@@ -183,7 +285,14 @@ async function scrape() {
     if (data.images.length > 0) {
       selectedImages.value = new Set(data.images.map((_, i) => i))
     }
-    Toast.success('抓取成功')
+    // Auto-match categories from the Booth product category path
+    const matched = autoMatchCategories(data.categories || [])
+    selectedCategories.value = new Set(matched)
+    if (matched.length > 0) {
+      Toast.success(`抓取成功，已自动匹配 ${matched.length} 个分类`)
+    } else {
+      Toast.success('抓取成功')
+    }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : '抓取失败'
     Toast.error(msg)
@@ -414,6 +523,7 @@ async function saveAsPost() {
           priority: 0,
           excerpt: { autoGenerate: true },
           cover: uploadedUrls[0] || result.value?.images?.[0] || '',
+          categories: [...selectedCategories.value],
         },
       },
       content: {
@@ -430,6 +540,7 @@ async function saveAsPost() {
     url.value = ''
     result.value = null
     selectedImages.value = new Set()
+    selectedCategories.value = new Set()
     title.value = ''
     author.value = ''
     description.value = ''
@@ -505,6 +616,35 @@ async function saveAsPost() {
         <div class="booth-grab-field">
           <label class="booth-grab-label">作者</label>
           <input v-model="author" type="text" class="booth-grab-input" placeholder="作者名称" />
+        </div>
+        <div class="booth-grab-field">
+          <div class="booth-grab-field-header">
+            <label class="booth-grab-label">
+              分类 ({{ selectedCategories.size }})
+            </label>
+            <span
+              v-if="result?.categories && result.categories.length"
+              class="booth-grab-category-source"
+            >
+              Booth 分类：{{ result.categories.join(' > ') }}
+            </span>
+          </div>
+          <div v-if="haloCategories.length" class="booth-grab-categories">
+            <label
+              v-for="cat in haloCategories"
+              :key="cat.name"
+              class="booth-grab-category-item"
+              :class="{ 'is-selected': selectedCategories.has(cat.name) }"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedCategories.has(cat.name)"
+                @change="toggleCategory(cat.name)"
+              />
+              <span>{{ cat.displayName }}</span>
+            </label>
+          </div>
+          <p v-else class="booth-grab-category-empty">暂无分类，请先到 文章 &gt; 分类 中创建</p>
         </div>
         <div class="booth-grab-field">
           <div class="booth-grab-field-header">
@@ -695,6 +835,51 @@ async function saveAsPost() {
     border-color: #3b82f6;
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
   }
+}
+
+.booth-grab-category-source {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.booth-grab-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.booth-grab-category-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid #d1d5db;
+  border-radius: 9999px;
+  font-size: 0.8125rem;
+  color: #374151;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.2s,
+    background-color 0.2s,
+    color 0.2s;
+
+  input[type='checkbox'] {
+    accent-color: #3b82f6;
+    cursor: pointer;
+  }
+
+  &.is-selected {
+    border-color: #3b82f6;
+    background-color: rgba(59, 130, 246, 0.08);
+    color: #2563eb;
+  }
+}
+
+.booth-grab-category-empty {
+  font-size: 0.8125rem;
+  color: #9ca3af;
+  margin: 0;
 }
 
 .booth-grab-btn {

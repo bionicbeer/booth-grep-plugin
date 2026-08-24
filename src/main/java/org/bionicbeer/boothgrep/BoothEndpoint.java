@@ -165,11 +165,56 @@ public class BoothEndpoint implements CustomEndpoint {
                 .retrieve()
                 .bodyToMono(String.class)
                 .map(this::parseHtml)
+                .flatMap(result -> fetchItemCategories(url, userAgent)
+                        .map(categories -> {
+                            result.setCategories(categories);
+                            return result;
+                        })
+                        .defaultIfEmpty(result))
                 .onErrorResume(e -> {
                     log.error("Failed to scrape {}: {}", url, e.getMessage());
                     return Mono.just(new ScrapeResult() {{
                         setError("Failed to fetch page: " + e.getMessage());
                     }});
+                });
+    }
+
+    /**
+     * Fetch the product category path from the booth.pm item JSON API
+     * (e.g. {@code https://booth.pm/zh-cn/items/8651879.json}).
+     * Returns the category path ordered from top-level parent to leaf,
+     * e.g. {@code ["3D Models", "3D Textures"]}. Empty on any failure.
+     */
+    private Mono<List<String>> fetchItemCategories(String url, String userAgent) {
+        return webClient.get()
+                .uri(url + ".json")
+                .header("User-Agent", userAgent)
+                .header("Accept", "application/json")
+                .header("X-Requested-With", "XMLHttpRequest")
+                .retrieve()
+                .bodyToMono(String.class)
+                .map(body -> {
+                    List<String> categories = new ArrayList<>();
+                    try {
+                        com.fasterxml.jackson.databind.JsonNode node =
+                                new com.fasterxml.jackson.databind.ObjectMapper().readTree(body);
+                        com.fasterxml.jackson.databind.JsonNode category = node.path("category");
+                        com.fasterxml.jackson.databind.JsonNode parentName = category.path("parent").path("name");
+                        if (parentName.isTextual() && !parentName.asText().isBlank()) {
+                            categories.add(parentName.asText());
+                        }
+                        com.fasterxml.jackson.databind.JsonNode name = category.path("name");
+                        if (name.isTextual() && !name.asText().isBlank()) {
+                            categories.add(name.asText());
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to parse booth categories JSON for {}: {}", url, e.getMessage());
+                    }
+                    return categories;
+                })
+                .onErrorResume(e -> {
+                    log.warn("Failed to fetch booth categories for {}: {}", url, e.getMessage());
+                    return Mono.just(new ArrayList<>());
                 });
     }
 
@@ -361,6 +406,7 @@ public class BoothEndpoint implements CustomEndpoint {
         private String description = "";
         private String author = "";
         private List<String> images = new ArrayList<>();
+        private List<String> categories = new ArrayList<>();
         private String error;
     }
 
