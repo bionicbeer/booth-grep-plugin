@@ -4,14 +4,16 @@ metadata:
   name: booth-grep-settings
 spec:
   forms:
-    - group: deepseek
-      label: DeepSeek AI 设置
+    - group: ai
+      label: AI 内容整理设置
       formSchema:
-        - $formkit: password
-          name: deepseekApiKey
-          label: DeepSeek API 密钥
-          placeholder: "sk-..."
-          help: "用于内容整理功能的 DeepSeek API 密钥"
+        - $formkit: aiModelSelector
+          name: modelName
+          label: 内容整理模型
+          modelType: language
+          available: true
+          clearable: true
+          help: "用于标题与描述内容整理的语言模型，留空时使用 AI Foundation 默认语言模型"
         - $formkit: textarea
           name: titlePrompt
           label: 标题整理默认提示词

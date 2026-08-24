@@ -61,7 +61,7 @@ onMounted(async () => {
 
   // If localStorage is empty, load defaults from backend (but don't save)
   try {
-    const { data } = await axiosInstance.get(`${API_BASE}/deepseek/defaults`)
+    const { data } = await axiosInstance.get(`${API_BASE}/ai/defaults`)
     prompts.value = {
       titlePrompt: data.titlePrompt || defaultPrompts.titlePrompt,
       descriptionPrompt: data.descriptionPrompt || defaultPrompts.descriptionPrompt,
@@ -99,9 +99,9 @@ function selectAllImages() {
   }
 }
 
-async function callDeepSeekAPI(content: string, prompt: string): Promise<string> {
+async function callOrganizeApi(content: string, prompt: string): Promise<string> {
   const { data } = await axiosInstance.post<{ result?: string; error?: string }>(
-    `${API_BASE}/deepseek/organize`,
+    `${API_BASE}/ai/organize`,
     { content, prompt },
   )
   if (data.error) {
@@ -117,7 +117,7 @@ async function organizeTitle() {
   }
   organizingTitle.value = true
   try {
-    const result = await callDeepSeekAPI(title.value, prompts.value.titlePrompt)
+    const result = await callOrganizeApi(title.value, prompts.value.titlePrompt)
     title.value = result
     Toast.success('标题已整理')
   } catch (e: unknown) {
@@ -135,7 +135,7 @@ async function organizeDescription() {
   }
   organizingDescription.value = true
   try {
-    const result = await callDeepSeekAPI(description.value, prompts.value.descriptionPrompt)
+    const result = await callOrganizeApi(description.value, prompts.value.descriptionPrompt)
     description.value = result
     Toast.success('描述已整理')
   } catch (e: unknown) {
@@ -149,11 +149,11 @@ async function organizeDescription() {
 async function scrape() {
   const inputUrl = url.value.trim()
   if (!inputUrl) {
-    Toast.warning('请输入 booth.pm 商品链接')
+    Toast.warning('请输入 Booth 商品链接或商品 ID')
     return
   }
-  if (!inputUrl.includes('booth.pm')) {
-    Toast.warning('请输入有效的 booth.pm 链接')
+  if (!inputUrl.includes('booth.pm') && !/^\d+$/.test(inputUrl)) {
+    Toast.warning('请输入有效的 booth.pm 链接或商品 ID')
     return
   }
 
@@ -446,7 +446,7 @@ async function saveAsPost() {
   <div class="booth-grab">
     <div class="booth-grab-header">
       <h1 class="booth-grab-title">从 Booth 抓取</h1>
-      <p class="booth-grab-desc">输入 booth.pm 商品页面链接，自动抓取图片、作者信息与商品描述，存为新文章。</p>
+      <p class="booth-grab-desc">输入 Booth 商品页面链接或商品 ID，自动抓取图片、作者信息与商品描述，存为新文章。</p>
     </div>
 
     <!-- URL Input -->
@@ -456,7 +456,7 @@ async function saveAsPost() {
           v-model="url"
           type="text"
           class="booth-grab-input"
-          placeholder="https://booth.pm/ja/items/..."
+          placeholder="https://booth.pm/ja/items/... 或商品 ID"
           @keyup.enter="scrape"
         />
         <button class="booth-grab-btn booth-grab-btn-primary" :disabled="loading" @click="scrape">

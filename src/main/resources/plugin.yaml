@@ -8,6 +8,8 @@ metadata:
 spec:
   enabled: true
   requires: ">=2.25.0"
+  pluginDependencies:
+    ai-foundation: ">=1.0.0 & <2.0.0"
   author:
     name: bionicbeer
     website: https://github.com/bionicbeer

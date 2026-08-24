@@ -14,7 +14,11 @@ dependencies {
     implementation platform('run.halo.tools.platform:plugin:2.25.0')
     compileOnly 'run.halo.app:api'
 
+    // AI Foundation SDK (provided at runtime by the AI Foundation plugin)
+    compileOnly 'run.halo.aifoundation:api:1.0.0'
+
     testImplementation 'run.halo.app:api'
+    testImplementation 'run.halo.aifoundation:api:1.0.0'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
@@ -50,6 +54,8 @@ tasks.named('generatePluginComponentsIdx') {
 }
 
 halo {
-    version = '2.25'
+    version = '2.26'
+    port = 8070
+    externalUrl = 'http://localhost:8070'
 }
 
