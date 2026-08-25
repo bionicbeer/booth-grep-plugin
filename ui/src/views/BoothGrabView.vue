@@ -424,12 +424,22 @@ function buildHtmlContent(uploadedUrls: string[]): string {
     const mainImg = galleryUrls[0]
     const galleryId = `ig-${Date.now()}`
 
+    // Self-contained thumbnail click handler (single quotes only, safe inside a
+    // double-quoted attribute), so the gallery works on any theme without
+    // theme-side scripts.
+    const thumbOnClick =
+      "var g=this.closest('[data-type=image-gallery]');if(!g)return;" +
+      "var m=g.querySelector('.ig-main');if(!m)return;" +
+      "m.srcset='';m.src='';m.src=this.src;m.alt=this.alt||'';" +
+      "g.querySelectorAll('.ig-thumb').forEach(function(t){t.style.borderColor='transparent'});" +
+      "this.style.borderColor='#3b82f6'"
+
     html += `<div data-type="image-gallery" data-images='${JSON.stringify(galleryUrls.map((url) => ({ url, alt: '' })))}' id="${galleryId}" style="border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin:1rem 0;">`
     html += `<img class="ig-main" src="${mainImg}" alt="" style="width:100%;max-height:500px;object-fit:contain;display:block;border-radius:8px 8px 0 0;background:#f3f4f6;" />`
     html += `<div style="display:flex;gap:6px;padding:8px;overflow-x:auto;background:#f9fafb;border-top:1px solid #e5e7eb;">`
     galleryUrls.forEach((url, i) => {
       const borderColor = i === 0 ? '#3b82f6' : 'transparent'
-      html += `<img class="ig-thumb" src="${url}" alt="" data-index="${i}" style="width:72px;height:72px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ${borderColor};transition:border-color .2s;" />`
+      html += `<img class="ig-thumb" src="${url}" alt="" data-index="${i}" onclick="${thumbOnClick}" style="width:72px;height:72px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ${borderColor};transition:border-color .2s;" />`
     })
     html += `</div></div>`
   }

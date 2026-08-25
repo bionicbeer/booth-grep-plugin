@@ -17,6 +17,17 @@ interface GalleryImage {
   alt: string
 }
 
+// Self-contained click handler for thumbnails, embedded as an inline onclick attribute.
+// This keeps the gallery interactive on any theme without relying on theme-side scripts
+// (which are lost when the theme template is not patched). Single quotes only, so it is
+// safe inside a double-quoted HTML attribute.
+const IG_THUMB_ONCLICK =
+  "var g=this.closest('[data-type=image-gallery]');if(!g)return;" +
+  "var m=g.querySelector('.ig-main');if(!m)return;" +
+  "m.srcset='';m.src='';m.src=this.src;m.alt=this.alt||'';" +
+  "g.querySelectorAll('.ig-thumb').forEach(function(t){t.style.borderColor='transparent'});" +
+  "this.style.borderColor='#3b82f6'"
+
 export const ImageGalleryExtension = Node.create<ExtensionOptions>({
   name: 'imageGallery',
 
@@ -99,6 +110,7 @@ export const ImageGalleryExtension = Node.create<ExtensionOptions>({
         src: img.url,
         alt: img.alt || '',
         'data-index': String(i),
+        onclick: IG_THUMB_ONCLICK,
         style:
           'width:72px;height:72px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid ' +
           (i === 0 ? '#3b82f6' : 'transparent') +
