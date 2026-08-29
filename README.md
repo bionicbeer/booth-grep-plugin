@@ -1,7 +1,7 @@
 # booth-grep
 
-![CI](https://github.com/bionicbeer/booth-grep/actions/workflows/ci.yaml/badge.svg)
-![Release](https://img.shields.io/github/v/release/bionicbeer/booth-grep?label=version&sort=semver)
+![CI](https://github.com/bionicbeer/booth-grep-plugin/actions/workflows/ci.yaml/badge.svg)
+![Release](https://img.shields.io/github/v/release/bionicbeer/booth-grep-plugin?label=version&sort=semver)
 
 booth-grep - Halo 插件
 

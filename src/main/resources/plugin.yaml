@@ -14,13 +14,13 @@ spec:
     name: bionicbeer
     website: https://github.com/bionicbeer
   logo: logo.png
-  homepage: https://github.com/bionicbeer/booth-grep#readme
-  repo: https://github.com/bionicbeer/booth-grep
-  issues: https://github.com/bionicbeer/booth-grep/issues
+  homepage: https://github.com/bionicbeer/booth-grep-plugin#readme
+  repo: https://github.com/bionicbeer/booth-grep-plugin
+  issues: https://github.com/bionicbeer/booth-grep-plugin/issues
   displayName: "booth-grep"
   description: "booth-grep - Halo 插件"
   settingName: booth-grep-settings
   configMapName: booth-grep-configmap
   license:
     - name: "GPL-3.0"
-      url: "https://github.com/bionicbeer/booth-grep/blob/main/LICENSE"
+      url: "https://github.com/bionicbeer/booth-grep-plugin/blob/main/LICENSE"
