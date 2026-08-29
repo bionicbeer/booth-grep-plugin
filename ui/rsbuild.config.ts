@@ -10,6 +10,11 @@ export default rsbuildConfig({
         "@": "./src",
       },
     },
+    output: {
+      // Keep the GPL copyright notice (/*! headers in ui/src) in the minified
+      // bundles shipped in the plugin JAR.
+      legalComments: 'inline',
+    },
     plugins: [pluginSass()],
     tools: {
       rspack: {
