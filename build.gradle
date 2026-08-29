@@ -17,6 +17,10 @@ dependencies {
     // AI Foundation SDK (provided at runtime by the AI Foundation plugin)
     compileOnly 'run.halo.aifoundation:api:1.0.0'
 
+    // AWS SDK v2 presigner for direct browser uploads to S3-compatible policies
+    implementation platform('software.amazon.awssdk:bom:2.31.45')
+    implementation 'software.amazon.awssdk:s3'
+
     testImplementation 'run.halo.app:api'
     testImplementation 'run.halo.aifoundation:api:1.0.0'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

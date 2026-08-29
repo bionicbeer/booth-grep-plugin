@@ -2,6 +2,7 @@ import { definePlugin } from '@halo-dev/ui-shared'
 import { IconPlug } from '@halo-dev/components'
 import { markRaw } from 'vue'
 import { ImageGalleryExtension } from './image-gallery-extension'
+import { FileDownloadExtension } from './file-download-extension'
 import RiDownloadCloudLine from '~icons/ri/download-cloud-line'
 
 export default definePlugin({
@@ -46,7 +47,7 @@ export default definePlugin({
   ],
   extensionPoints: {
     'default:editor:extension:create': () => {
-      return [ImageGalleryExtension]
+      return [ImageGalleryExtension, FileDownloadExtension]
     },
   },
 })

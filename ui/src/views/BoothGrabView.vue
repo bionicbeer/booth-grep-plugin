@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { axiosInstance, coreApiClient } from '@halo-dev/api-client'
 import { Toast } from '@halo-dev/components'
+import { buildFileDownloadHtml, formatFileSize, type DownloadFile } from '../utils'
 
 interface ScrapeResult {
   title: string
@@ -53,6 +54,234 @@ const customUA = ref('')
 // Category state
 const haloCategories = ref<HaloCategory[]>([])
 const selectedCategories = ref<Set<string>>(new Set())
+
+// File upload state (dual storage: local / S3, chosen per policy)
+interface StoragePolicy {
+  name: string
+  displayName: string
+  template: string
+  label: string
+}
+
+interface UploadedFile extends DownloadFile {
+  policyLabel: string
+}
+
+const storagePolicies = ref<StoragePolicy[]>([])
+const filePolicyName = ref('')
+const uploadedFiles = ref<UploadedFile[]>([])
+const fileUploading = ref(false)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const uploadProgress = ref(0)
+const uploadingFileName = ref('')
+
+const selectedFilePolicy = computed(() => {
+  return storagePolicies.value.find((p) => p.name === filePolicyName.value) || null
+})
+
+async function loadStoragePolicies() {
+  try {
+    const response = await fetch('/apis/storage.halo.run/v1alpha1/policies', {
+      credentials: 'include',
+    })
+    if (!response.ok) return
+    const data = await response.json()
+    storagePolicies.value = (data?.items || [])
+      .map((p: any) => {
+        const template = p?.spec?.templateName || ''
+        const displayName = p?.spec?.displayName || p?.metadata?.name || ''
+        let label = displayName
+        if (template === 'local') {
+          label = `本地存储（${displayName}）`
+        } else if (template.includes('s3')) {
+          // plugin-s3 registers templates like "s3" / "s3os"
+          label = `S3 对象存储（${displayName}）`
+        }
+        return {
+          name: p?.metadata?.name || '',
+          displayName,
+          template,
+          label,
+        }
+      })
+      .filter((p: StoragePolicy) => p.name)
+    // Prefer the local policy as default when available
+    const localPolicy = storagePolicies.value.find((p) => p.template === 'local')
+    if (!filePolicyName.value && storagePolicies.value.length > 0) {
+      filePolicyName.value = (localPolicy || storagePolicies.value[0]).name
+    }
+  } catch (e) {
+    console.error('Failed to load storage policies:', e)
+  }
+}
+
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+
+// XHR-based upload: fetch cannot report upload progress events, XHR can.
+// Note: withCredentials is NOT set — bucket CORS does not allow credentials,
+// while same-origin Halo API requests carry session cookies automatically.
+function xhrUpload(
+  method: 'PUT' | 'POST',
+  url: string,
+  body: File | FormData,
+  onProgress: (percent: number) => void,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(method, url)
+    xhr.upload.addEventListener('progress', (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress(Math.round((event.loaded / event.total) * 100))
+      }
+    })
+    xhr.addEventListener('load', () => resolve({ status: xhr.status, text: xhr.responseText }))
+    xhr.addEventListener('error', () => reject(new Error('网络错误，请求失败')))
+    xhr.send(body)
+  })
+}
+
+// Upload through the Halo server (default for local policies and S3 fallback)
+async function uploadViaConsole(file: File): Promise<string> {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('policyName', filePolicyName.value)
+  const { status, text } = await xhrUpload(
+    'POST',
+    '/apis/api.console.halo.run/v1alpha1/attachments/upload',
+    formData,
+    (percent) => {
+      uploadProgress.value = percent
+    },
+  )
+  if (status < 200 || status >= 300) {
+    throw new Error(`服务器上传失败（${status}）`)
+  }
+  const data = JSON.parse(text || '{}')
+  const permalink = data?.status?.permalink || data?.spec?.url || ''
+  if (!permalink) {
+    throw new Error('无返回地址')
+  }
+  return permalink
+}
+
+// Scheme A: presigned PUT URL. The browser PUTs the file straight to the bucket;
+// Content-Type is left unsigned on the server, so no Content-Type header is set here.
+async function uploadViaPresignedPut(file: File): Promise<string> {
+  const presignResponse = await fetch(`${API_BASE}/upload/presign`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      policyName: filePolicyName.value,
+      fileName: file.name,
+      size: file.size,
+      mediaType: file.type || 'application/octet-stream',
+    }),
+  })
+  if (!presignResponse.ok) {
+    const err = await presignResponse.json().catch(() => ({}))
+    throw new Error(err?.error || `预签名失败（${presignResponse.status}）`)
+  }
+  const presignData = await presignResponse.json()
+
+  const putResult = await xhrUpload('PUT', presignData.uploadUrl, file, (percent) => {
+    uploadProgress.value = percent
+  })
+  if (putResult.status < 200 || putResult.status >= 300) {
+    throw new Error(
+      `直传存储桶失败（${putResult.status}），请确认存储桶已配置 CORS`,
+    )
+  }
+
+  const completeResponse = await fetch(`${API_BASE}/upload/complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({
+      policyName: filePolicyName.value,
+      objectKey: presignData.objectKey,
+      fileName: file.name,
+      size: file.size,
+      mediaType: file.type || 'application/octet-stream',
+    }),
+  })
+  if (!completeResponse.ok) {
+    const err = await completeResponse.json().catch(() => ({}))
+    throw new Error(err?.error || `登记附件失败（${completeResponse.status}）`)
+  }
+  const completeData = await completeResponse.json()
+  if (!completeData?.permalink) {
+    throw new Error('无返回地址')
+  }
+  return completeData.permalink
+}
+
+async function uploadFiles(files: File[]) {
+  if (files.length === 0) return
+  if (!filePolicyName.value) {
+    Toast.warning('未找到可用的存储策略，无法上传')
+    return
+  }
+  fileUploading.value = true
+  const policy = selectedFilePolicy.value
+  const policyLabel = policy?.label || filePolicyName.value
+  const useS3Direct = !!policy && policy.template.includes('s3')
+  let uploadedCount = 0
+  try {
+    for (const file of files) {
+      try {
+        uploadingFileName.value = file.name
+        uploadProgress.value = 0
+        let fileUrl = ''
+        if (useS3Direct) {
+          try {
+            fileUrl = await uploadViaPresignedPut(file)
+          } catch (e) {
+            const message = e instanceof Error ? e.message : String(e)
+            Toast.warning(`S3 直传失败（${message}），已改用服务器中转上传`)
+            fileUrl = await uploadViaConsole(file)
+          }
+        } else {
+          fileUrl = await uploadViaConsole(file)
+        }
+        uploadedFiles.value = [
+          ...uploadedFiles.value,
+          { url: fileUrl, name: file.name, size: file.size, policyLabel },
+        ]
+        uploadedCount++
+      } catch (e) {
+        console.error('Failed to upload file:', e)
+        const message = e instanceof Error ? e.message : ''
+        Toast.error(`上传失败：${file.name}${message ? `（${message}）` : ''}`)
+      }
+    }
+    if (uploadedCount > 0) {
+      Toast.success(`已上传 ${uploadedCount} 个文件`)
+    }
+  } finally {
+    fileUploading.value = false
+    uploadingFileName.value = ''
+    uploadProgress.value = 0
+  }
+}
+
+function handleFileSelect(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = input.files ? Array.from(input.files) : []
+  input.value = ''
+  void uploadFiles(files)
+}
+
+function handleFileDrop(event: DragEvent) {
+  const files = event.dataTransfer?.files ? Array.from(event.dataTransfer.files) : []
+  void uploadFiles(files)
+}
+
+function removeUploadedFile(index: number) {
+  uploadedFiles.value = uploadedFiles.value.filter((_, i) => i !== index)
+}
 
 async function loadHaloCategories() {
   try {
@@ -149,6 +378,9 @@ onMounted(async () => {
 
   // Load all Halo categories for the selector
   loadHaloCategories()
+
+  // Load storage policies (local / S3) for the file upload control
+  loadStoragePolicies()
 
   // Check localStorage first
   const saved = localStorage.getItem(PROMPTS_STORAGE_KEY)
@@ -408,6 +640,14 @@ function buildTiptapContent(): { type: string; content: any[] } {
     })
   }
 
+  // File download cards (uploaded attachments)
+  for (const file of uploadedFiles.value) {
+    content.push({
+      type: 'fileDownload',
+      attrs: { url: file.url, name: file.name, size: file.size },
+    })
+  }
+
   return { type: 'doc', content }
 }
 
@@ -454,6 +694,14 @@ function buildHtmlContent(uploadedUrls: string[]): string {
     const lines = description.value.split('\n').filter((l) => l.trim())
     for (const line of lines) {
       html += `<p>${line.trim()}</p>`
+    }
+  }
+
+  // File download cards (uploaded attachments)
+  if (uploadedFiles.value.length > 0) {
+    html += `<p><strong>下载：</strong></p>`
+    for (const file of uploadedFiles.value) {
+      html += buildFileDownloadHtml(file)
     }
   }
 
@@ -551,6 +799,7 @@ async function saveAsPost() {
     result.value = null
     selectedImages.value = new Set()
     selectedCategories.value = new Set()
+    uploadedFiles.value = []
     title.value = ''
     author.value = ''
     description.value = ''
@@ -655,6 +904,71 @@ async function saveAsPost() {
             </label>
           </div>
           <p v-else class="booth-grab-category-empty">暂无分类，请先到 文章 &gt; 分类 中创建</p>
+        </div>
+        <div class="booth-grab-field">
+          <div class="booth-grab-field-header">
+            <label class="booth-grab-label">下载文件 ({{ uploadedFiles.length }})</label>
+            <select v-model="filePolicyName" class="booth-grab-select" title="选择存储位置">
+              <option v-for="p in storagePolicies" :key="p.name" :value="p.name">
+                {{ p.label }}
+              </option>
+            </select>
+          </div>
+          <div
+            class="booth-grab-file-dropzone"
+            :class="{ 'is-uploading': fileUploading }"
+            @click="triggerFileInput"
+            @dragover.prevent
+            @drop.prevent="handleFileDrop"
+          >
+            <input
+              ref="fileInputRef"
+              type="file"
+              multiple
+              hidden
+              @change="handleFileSelect"
+            />
+            <template v-if="fileUploading">
+              <div class="booth-grab-upload-progress">
+                <div class="booth-grab-upload-progress-label">
+                  <span class="booth-grab-spinner" />
+                  上传中 {{ uploadingFileName }} {{ uploadProgress }}%
+                </div>
+                <div class="booth-grab-progress-track">
+                  <div class="booth-grab-progress-bar" :style="{ width: uploadProgress + '%' }" />
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              点击或拖拽文件到此处上传，保存文章时将以下载卡片形式写入正文
+            </template>
+          </div>
+          <div v-if="uploadedFiles.length" class="booth-grab-file-list">
+            <div
+              v-for="(file, index) in uploadedFiles"
+              :key="file.url"
+              class="booth-grab-file-item"
+            >
+              <span class="booth-grab-file-icon">↓</span>
+              <div class="booth-grab-file-info">
+                <span class="booth-grab-file-name" :title="file.url">{{ file.name }}</span>
+                <span class="booth-grab-file-meta">
+                  {{ formatFileSize(file.size) || '大小未知' }} · {{ file.policyLabel }}
+                </span>
+              </div>
+              <button
+                class="booth-grab-btn booth-grab-btn-sm"
+                type="button"
+                title="移除"
+                @click="removeUploadedFile(index)"
+              >
+                移除
+              </button>
+            </div>
+          </div>
+          <p v-if="!storagePolicies.length" class="booth-grab-category-empty">
+            未找到存储策略，请先到 附件 &gt; 存储策略 中配置（本地或 S3）
+          </p>
         </div>
         <div class="booth-grab-field">
           <div class="booth-grab-field-header">
@@ -890,6 +1204,129 @@ async function saveAsPost() {
   font-size: 0.8125rem;
   color: #9ca3af;
   margin: 0;
+}
+
+.booth-grab-select {
+  max-width: 240px;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  color: #374151;
+  background: #fff;
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+  }
+}
+
+.booth-grab-file-dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  color: #6b7280;
+  font-size: 0.8125rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+
+  &:hover {
+    border-color: #3b82f6;
+    background: rgba(59, 130, 246, 0.04);
+  }
+
+  &.is-uploading {
+    cursor: wait;
+    opacity: 0.8;
+  }
+}
+
+.booth-grab-upload-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.booth-grab-upload-progress-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.booth-grab-progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e5e7eb;
+}
+
+.booth-grab-progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: #3b82f6;
+  transition: width 0.2s ease;
+}
+
+.booth-grab-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.booth-grab-file-item {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.booth-grab-file-icon {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: #dbeafe;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+}
+
+.booth-grab-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.booth-grab-file-name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.booth-grab-file-meta {
+  font-size: 0.75rem;
+  color: #6b7280;
 }
 
 .booth-grab-btn {

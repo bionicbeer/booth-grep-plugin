@@ -29,13 +29,19 @@ public class BoothEndpoint implements CustomEndpoint {
     private final WebClient webClient;
     private final ReactiveExtensionClient client;
     private final ExtensionGetter extensionGetter;
+    private final S3PresignService s3PresignService;
 
     private static final String CONFIGMAP_NAME = "booth-grep-configmap";
     private static final String SETTINGS_KEY = "ai";
 
-    public BoothEndpoint(ReactiveExtensionClient client, ExtensionGetter extensionGetter) {
+    /** Direct browser uploads are capped at 1 GB (presigned PUT supports up to 5 GB). */
+    private static final long MAX_DIRECT_UPLOAD_SIZE = 1024L * 1024 * 1024;
+
+    public BoothEndpoint(ReactiveExtensionClient client, ExtensionGetter extensionGetter,
+                         S3PresignService s3PresignService) {
         this.client = client;
         this.extensionGetter = extensionGetter;
+        this.s3PresignService = s3PresignService;
         this.webClient = WebClient.builder()
                 .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(5 * 1024 * 1024))
                 .build();
@@ -60,6 +66,14 @@ public class BoothEndpoint implements CustomEndpoint {
                 .POST("/booth/ai/organize", this::organizeAiContent,
                         builder -> builder.operationId("OrganizeWithAi")
                                 .description("Organize content using AI Foundation language model")
+                                .tag(tag))
+                .POST("/booth/upload/presign", this::presignUpload,
+                        builder -> builder.operationId("PresignBoothUpload")
+                                .description("Issue a presigned PUT URL for direct browser upload to an S3 policy")
+                                .tag(tag))
+                .POST("/booth/upload/complete", this::completeUpload,
+                        builder -> builder.operationId("CompleteBoothUpload")
+                                .description("Verify a direct upload and register it as a Halo attachment")
                                 .tag(tag))
                 .build();
     }
@@ -480,6 +494,107 @@ public class BoothEndpoint implements CustomEndpoint {
     public static class OrganizeRequest {
         private String content;
         private String prompt;
+    }
+
+    // ==================== S3 direct upload (presigned PUT URL) ====================
+
+    private Mono<ServerResponse> presignUpload(ServerRequest request) {
+        return request.bodyToMono(UploadPresignRequest.class)
+                .flatMap(body -> {
+                    if (body.getPolicyName() == null || body.getPolicyName().isBlank()
+                            || body.getFileName() == null || body.getFileName().isBlank()) {
+                        return ServerResponse.badRequest().bodyValue(
+                                Map.of("error", "policyName 与 fileName 为必填项"));
+                    }
+                    if (body.getSize() <= 0 || body.getSize() > MAX_DIRECT_UPLOAD_SIZE) {
+                        return ServerResponse.badRequest().bodyValue(
+                                Map.of("error", "文件大小超出直传限制（1 GB）"));
+                    }
+                    String objectKey = generateObjectKey(body.getFileName());
+                    return s3PresignService.loadS3PolicyConfig(body.getPolicyName())
+                            .map(cfg -> {
+                                java.net.URL uploadUrl = s3PresignService.presignPut(
+                                        cfg, objectKey, java.time.Duration.ofMinutes(10));
+                                return Map.of("uploadUrl", uploadUrl.toString(),
+                                        "objectKey", objectKey, "expiresIn", 600);
+                            })
+                            .flatMap(res -> ServerResponse.ok().bodyValue(res))
+                            .onErrorResume(e -> {
+                                log.warn("Failed to presign upload for policy {}: {}",
+                                        body.getPolicyName(), e.getMessage());
+                                return ServerResponse.badRequest().bodyValue(
+                                        Map.of("error", String.valueOf(e.getMessage())));
+                            });
+                });
+    }
+
+    private Mono<ServerResponse> completeUpload(ServerRequest request) {
+        return request.bodyToMono(UploadCompleteRequest.class)
+                .flatMap(body -> {
+                    if (body.getPolicyName() == null || body.getPolicyName().isBlank()
+                            || body.getObjectKey() == null || body.getObjectKey().isBlank()
+                            || body.getFileName() == null || body.getFileName().isBlank()) {
+                        return ServerResponse.badRequest().bodyValue(
+                                Map.of("error", "policyName、objectKey 与 fileName 为必填项"));
+                    }
+                    Mono<String> owner = request.exchange().getPrincipal()
+                            .map(java.security.Principal::getName)
+                            .defaultIfEmpty("anonymousUser");
+                    return s3PresignService.loadS3PolicyConfig(body.getPolicyName())
+                            .flatMap(cfg -> s3PresignService.verifyObjectExists(cfg, body.getObjectKey())
+                                    .flatMap(exists -> {
+                                        if (!Boolean.TRUE.equals(exists)) {
+                                            return Mono.error(new IllegalStateException(
+                                                    "存储桶中未找到该文件，上传可能未完成"));
+                                        }
+                                        return owner.flatMap(ownerName -> s3PresignService.registerAttachment(
+                                                cfg, body.getObjectKey(), body.getFileName(),
+                                                body.getSize(), body.getMediaType(), ownerName));
+                                    }))
+                            .flatMap(permalink -> ServerResponse.ok()
+                                    .bodyValue(Map.of("permalink", permalink)))
+                            .onErrorResume(e -> {
+                                log.warn("Failed to complete direct upload for object {}: {}",
+                                        body.getObjectKey(), e.getMessage());
+                                return ServerResponse.badRequest().bodyValue(
+                                        Map.of("error", String.valueOf(e.getMessage())));
+                            });
+                });
+    }
+
+    /**
+     * Generate a collision-safe bucket object key while preserving the original
+     * file extension (limited to a short alphanumeric suffix for URL safety).
+     */
+    private String generateObjectKey(String fileName) {
+        String ext = "";
+        int dot = fileName.lastIndexOf('.');
+        if (dot > 0 && dot < fileName.length() - 1) {
+            String candidate = fileName.substring(dot).toLowerCase();
+            if (candidate.matches("\\.[a-z0-9]{1,8}")) {
+                ext = candidate;
+            }
+        }
+        String random = Long.toString(
+                Math.abs(java.util.concurrent.ThreadLocalRandom.current().nextInt(1_000_000)), 36);
+        return "booth-download-" + System.currentTimeMillis() + "-" + random + ext;
+    }
+
+    @Data
+    public static class UploadPresignRequest {
+        private String policyName;
+        private String fileName;
+        private long size;
+        private String mediaType;
+    }
+
+    @Data
+    public static class UploadCompleteRequest {
+        private String policyName;
+        private String objectKey;
+        private String fileName;
+        private long size;
+        private String mediaType;
     }
 
     @Data
