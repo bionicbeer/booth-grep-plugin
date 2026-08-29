@@ -53,7 +53,8 @@ public class S3PresignService {
 
     /** Connection details extracted from a storage policy and its configMap. */
     public record PolicyConfig(String policyName, String endpoint, String protocol, String region,
-                               String bucket, String accessKey, String accessSecret, boolean pathStyle) {
+                               String bucket, String accessKey, String accessSecret,
+                               boolean pathStyle, String domain) {
     }
 
     /**
@@ -100,12 +101,16 @@ public class S3PresignService {
             String accessKey = text(node, "accessKey");
             String accessSecret = text(node, "accessSecret");
             boolean pathStyle = node.path("enablePathStyleAccess").asBoolean(false);
+            // Custom domain bound to the bucket (plugin-s3 "自定义域名"), used for public links.
+            String domain = text(node, "domain")
+                    .replaceFirst("^https?://", "")
+                    .replaceFirst("/+$", "");
             if (endpoint.isEmpty() || bucket.isEmpty() || accessKey.isEmpty() || accessSecret.isEmpty()) {
                 throw new IllegalStateException("存储策略配置不完整（需要 endpoint、bucket、accessKey、accessSecret）");
             }
             return new PolicyConfig(policyName, endpoint, protocol,
                     region.isEmpty() ? "us-east-1" : region,
-                    bucket, accessKey, accessSecret, pathStyle);
+                    bucket, accessKey, accessSecret, pathStyle, domain);
         } catch (IllegalStateException e) {
             throw e;
         } catch (Exception e) {
@@ -213,8 +218,16 @@ public class S3PresignService {
                         }));
     }
 
-    /** Permalink matching plugin-s3 link style (virtual-host or path-style). */
+    /**
+     * Permalink matching plugin-s3 link style. When the policy binds a custom
+     * domain, links must use it: the bucket endpoint rejects unsigned access
+     * (R2 answers 400 InvalidArgument/Authorization), so a bucket-domain link
+     * written into an article would be undownloadable.
+     */
     public String buildPermalink(PolicyConfig cfg, String objectKey) {
+        if (!cfg.domain().isEmpty()) {
+            return cfg.protocol() + "://" + cfg.domain() + "/" + objectKey;
+        }
         String host = cfg.pathStyle()
                 ? cfg.endpoint() + "/" + cfg.bucket()
                 : cfg.bucket() + "." + cfg.endpoint();
